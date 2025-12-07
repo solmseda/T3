@@ -35,6 +35,14 @@ class AIState(Enum):
 class GameAI():
 
     def __init__(self):
+        # Regras principais:
+        # - Máquina de estados reativa: EXPLORE, COLLECT, CHASE, EVADE, SEARCH.
+        # - Coleta: pega blue/red/weak, evita green; marca posição de ouro para planejar rota.
+        # - Combate: persegue/atira quando enemy#X; interrompe plano de ouro.
+        # - Evasão: ao sofrer dano recua LOS; passos viram SEARCH.
+        # - Navegação: evita hazards/bloqueios, penaliza riscos (breeze/flash), prioriza menos visitados.
+        # - Planejamento: a cada 100 ações faz A* para ouro conhecido em células seguras visitadas.
+        # - Anti-giro: quebra ciclos de viradas forçando andar ou ré quando seguro.
         self.player = Position()
         self.state = AIState.EXPLORE
         self.dir = "north"
@@ -54,6 +62,15 @@ class GameAI():
         self.last_move_failed = False
         self.evade_steps = 0
         self.turn_bias = 0  # alternates left/right when searching
+        self.turn_streak = 0
+        self.last_action: Optional[str] = None
+        self.hazard_alert = False  # true when breeze/flash sensed
+        self.gold_spots: set[Tuple[int, int]] = set()
+        self.planned_path: List[str] = []
+        self.action_counter = 0
+        self.debug = True  # set to False to silence logs
+        self._log_buffer: List[str] = []
+        self.risky: set[Tuple[int, int]] = set()
 
     # <summary>
     # Refresh player status
@@ -117,12 +134,15 @@ class GameAI():
     def _is_safe(self, pos: Tuple[int, int]) -> bool:
         return pos not in self.hazards and pos not in self.blocked
 
+    def _is_risky(self, pos: Tuple[int, int]) -> bool:
+        return pos in self.risky
+
     def _mark_blocked_ahead(self):
         self.blocked.add(self._front_pos())
 
-    def _mark_adjacent_hazard(self):
+    def _mark_adjacent_risk(self):
         for pos in self.GetObservableAdjacentPositions(self.player):
-            self.hazards.add(self._pos_tuple(pos))
+            self.risky.add(self._pos_tuple(pos))
 
 
     # <summary>
@@ -203,24 +223,36 @@ class GameAI():
             if s == "blocked":
                 self.last_move_failed = True
                 self._mark_blocked_ahead()
+                self._log("obs: blocked")
             
             elif s == "steps":
                 self.heard_steps = 3
+                self._log("obs: steps near")
             
             elif s in ("breeze", "flash"):
-                self._mark_adjacent_hazard()
+                # Risco ao redor (poço/teleporte) não bloqueia, mas penaliza caminho
+                self._mark_adjacent_risk()
+                self.hazard_alert = True
+                self._log(f"obs: {s} -> marking adjacent hazard")
 
             elif s in ("blueLight", "redLight", "weakLight", "greenLight"):
                 self.item_here = s
                 if s == "greenLight":
                     self.hazards.add(self._pos_tuple(self.player))
+                self._log(f"obs: {s} at {self._pos_tuple(self.player)}")
+                if s == "blueLight":
+                    self.gold_spots.add(self._pos_tuple(self.player))
 
             elif s == "damage":
+                # sofre dano: entrar em evasão (LOS)
                 self.damage_taken = True
                 self.evade_steps = max(self.evade_steps, 3)
+                self._log("obs: damage taken, entering evade")
 
             elif s == "hit":
+                # confirmamos tiro acertado
                 self.just_hit_enemy = True
+                self._log("obs: hit landed")
             
             elif s.startswith("enemy#") or s == "enemy":
                 try:
@@ -228,6 +260,7 @@ class GameAI():
                     self.enemy_distance = int(value)
                 except Exception:
                     self.enemy_distance = 1
+                self._log(f"obs: enemy at {self.enemy_distance} steps")
 
 
     # <summary>
@@ -239,6 +272,10 @@ class GameAI():
         self.damage_taken = False
         self.just_hit_enemy = False
         self.last_move_failed = False
+        self.hazard_alert = False
+        # remove stale gold mark if nothing visível aqui
+        if self._pos_tuple(self.player) in self.gold_spots and self.item_here is None:
+            self.gold_spots.discard(self._pos_tuple(self.player))
     
 
     # <summary>
@@ -254,16 +291,32 @@ class GameAI():
 
         self._update_state()
 
-        if self.state == AIState.EVADE:
-            return self._evasive_move()
-        if self.state == AIState.COLLECT:
-            return self._collect_decision()
-        if self.state == AIState.CHASE:
-            return self._chase_or_attack()
-        if self.state == AIState.SEARCH:
-            return self._search_for_enemy()
+        if self.state in (AIState.EVADE, AIState.CHASE):
+            self.planned_path.clear()
 
-        return self._explore_decision()
+        if self.planned_path:
+            decision = self.planned_path.pop(0)
+        else:
+            self._maybe_plan_to_gold()
+
+            if self.planned_path:
+                decision = self.planned_path.pop(0)
+            else:
+                if self.state == AIState.EVADE:
+                    decision = self._evasive_move()
+                elif self.state == AIState.COLLECT:
+                    decision = self._collect_decision()
+                elif self.state == AIState.CHASE:
+                    decision = self._chase_or_attack()
+                elif self.state == AIState.SEARCH:
+                    decision = self._search_for_enemy()
+                else:
+                    decision = self._explore_decision()
+
+        decision = self._anti_spin(decision)
+        self._register_action(decision)
+        self._flush_logs(decision)
+        return decision
 
     def _update_state(self):
         if self.damage_taken or self.evade_steps > 0:
@@ -285,9 +338,11 @@ class GameAI():
         self.state = AIState.EXPLORE
 
     def _collect_decision(self) -> str:
+        # Regra de coleta: pegar itens úteis, evitar veneno
         if self.item_here == "redLight":
             return "pegar_powerup"
         if self.item_here == "blueLight":
+            self.gold_spots.discard(self._pos_tuple(self.player))
             return "pegar_ouro"
         if self.item_here == "weakLight":
             return "pegar_anel"
@@ -314,6 +369,7 @@ class GameAI():
         return "virar_direita"
 
     def _chase_or_attack(self) -> str:
+        # Regras de perseguição/tiro
         if self.enemy_distance is not None:
             if self.enemy_distance <= 2 or self.just_hit_enemy:
                 return "atacar"
@@ -331,6 +387,10 @@ class GameAI():
 
     def _explore_decision(self) -> str:
         forward_pos = self._front_pos()
+
+        if self.hazard_alert and self._is_safe(self._back_pos()) and not self.last_move_failed:
+            return "andar_re"
+
         if self.last_move_failed or not self._is_safe(forward_pos):
             return self._pick_turn_by_visit()
 
@@ -365,13 +425,14 @@ class GameAI():
 
         for action, pos in mapping:
             if self._is_safe(pos):
-                candidates.append((self.visited.get(pos, 0), priority[action], action))
+                risk = 1 if self._is_risky(pos) else 0
+                candidates.append((risk, self.visited.get(pos, 0), priority[action], action))
 
         if not candidates:
             return self._fallback_move()
 
-        candidates.sort(key=lambda x: (x[0], x[1]))
-        return candidates[0][2]
+        candidates.sort(key=lambda x: (x[0], x[1], x[2]))
+        return candidates[0][3]
 
     def _fallback_move(self) -> str:
         for action, pos in [
@@ -380,7 +441,150 @@ class GameAI():
             ("andar", self._front_pos()),
             ("andar_re", self._back_pos())
         ]:
-            if pos not in self.blocked:
+            if self._is_safe(pos):
                 return action
         return "virar_direita"
+
+    def _register_action(self, action: str):
+        self.action_counter += 1
+        if action in ("virar_esquerda", "virar_direita"):
+            self.turn_streak += 1
+        else:
+            self.turn_streak = 0
+        self.last_action = action
+
+    def _anti_spin(self, action: str) -> str:
+        # If turning many times, force a move to break loops when safe.
+        if action in ("virar_esquerda", "virar_direita"):
+            if self.turn_streak >= 2 and self.state in (AIState.EXPLORE, AIState.SEARCH):
+                if not self.last_move_failed and self._is_safe(self._front_pos()):
+                    return "andar"
+                if self._is_safe(self._back_pos()):
+                    return "andar_re"
+        return action
+
+    def _maybe_plan_to_gold(self):
+        if not self.gold_spots:
+            return
+        if self.action_counter == 0 or self.action_counter % 100 != 0:
+            return
+        if self.state not in (AIState.EXPLORE, AIState.COLLECT, AIState.SEARCH):
+            return
+        # Planejamento A*: apenas em células já visitadas e seguras
+        start = self._pos_tuple(self.player)
+        safe_nodes = {pos for pos in self.visited.keys() if pos not in self.hazards and pos not in self.blocked}
+        if start not in safe_nodes:
+            safe_nodes.add(start)
+
+        target, path_positions = self._nearest_gold_path(start, safe_nodes)
+        if target and path_positions:
+            actions = self._path_to_actions(path_positions)
+            if actions:
+                self.planned_path = actions
+                self._log(f"plan: path to gold {target} with {len(actions)} steps")
+
+    def _nearest_gold_path(self, start: Tuple[int, int], safe_nodes: set[Tuple[int, int]]):
+        best_target = None
+        best_path = None
+        for g in self.gold_spots:
+            if g not in safe_nodes:
+                continue
+            path = self._astar_path(start, g, safe_nodes)
+            if path:
+                if best_path is None or len(path) < len(best_path):
+                    best_path = path
+                    best_target = g
+        return best_target, best_path
+
+    def _astar_path(self, start: Tuple[int, int], goal: Tuple[int, int], safe_nodes: set[Tuple[int, int]]):
+        if start == goal:
+            return [start]
+        open_set = {start}
+        came_from: Dict[Tuple[int, int], Tuple[int, int]] = {}
+        g_score = {start: 0}
+        f_score = {start: self._manhattan(start, goal)}
+        while open_set:
+            current = min(open_set, key=lambda n: f_score.get(n, float("inf")))
+            if current == goal:
+                return self._reconstruct_path(came_from, current)
+            open_set.remove(current)
+            for neighbor in self._neighbors(current, safe_nodes):
+                tentative_g = g_score[current] + 1
+                if tentative_g < g_score.get(neighbor, float("inf")):
+                    came_from[neighbor] = current
+                    g_score[neighbor] = tentative_g
+                    f_score[neighbor] = tentative_g + self._manhattan(neighbor, goal)
+                    open_set.add(neighbor)
+        return None
+
+    def _neighbors(self, pos: Tuple[int, int], safe_nodes: set[Tuple[int, int]]):
+        x, y = pos
+        candidates = [(x+1, y), (x-1, y), (x, y+1), (x, y-1)]
+        return [p for p in candidates if p in safe_nodes]
+
+    def _manhattan(self, a: Tuple[int, int], b: Tuple[int, int]) -> int:
+        return abs(a[0]-b[0]) + abs(a[1]-b[1])
+
+    def _reconstruct_path(self, came_from: Dict[Tuple[int, int], Tuple[int, int]], current: Tuple[int, int]):
+        path = [current]
+        while current in came_from:
+            current = came_from[current]
+            path.append(current)
+        path.reverse()
+        return path
+
+    def _path_to_actions(self, path: List[Tuple[int, int]]) -> List[str]:
+        # path includes start position; convert to actions sequence
+        if len(path) < 2:
+            return []
+        actions: List[str] = []
+        dir_sim = self.dir
+        current = path[0]
+        for nxt in path[1:]:
+            dx = nxt[0] - current[0]
+            dy = nxt[1] - current[1]
+            desired_dir = dir_sim
+            if dx == 1:
+                desired_dir = "east"
+            elif dx == -1:
+                desired_dir = "west"
+            elif dy == 1:
+                desired_dir = "south"
+            elif dy == -1:
+                desired_dir = "north"
+
+            turn_action, dir_sim = self._turn_actions(dir_sim, desired_dir)
+            if turn_action:
+                actions.extend(turn_action)
+            actions.append("andar")
+            current = nxt
+        return actions
+
+    def _turn_actions(self, current_dir: str, desired_dir: str):
+        if current_dir == desired_dir:
+            return [], current_dir
+        idx_cur = self._DIRECTIONS.index(current_dir)
+        idx_des = self._DIRECTIONS.index(desired_dir)
+        diff = (idx_des - idx_cur) % 4
+        if diff == 1:
+            return ["virar_direita"], desired_dir
+        if diff == 3:
+            return ["virar_esquerda"], desired_dir
+        return ["virar_direita", "virar_direita"], desired_dir
+
+    def _log(self, msg: str):
+        if self.debug:
+            self._log_buffer.append(msg)
+
+    def _flush_logs(self, decision: str):
+        if not self.debug:
+            return
+        logs = self._log_buffer
+        self._log_buffer = []
+        if logs:
+            print(f"[AI] pos={self._pos_tuple(self.player)} dir={self.dir} state={self.state.name} -> {decision}")
+            for m in logs:
+                print(f"[AI] {m}")
+        else:
+            print(f"[AI] pos={self._pos_tuple(self.player)} dir={self.dir} state={self.state.name} -> {decision}")
 

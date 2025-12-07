@@ -1,0 +1,27 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# Python cache / builds
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+.eggs/
+build/
+dist/
+pip-wheel-metadata/
+venv/
+.venv/
+env/
+
+# Tests / tools
+.pytest_cache/
+.coverage
+
+# Local artifacts
+*.log
+extracted_pdf_text.txt

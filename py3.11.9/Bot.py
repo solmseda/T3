@@ -34,8 +34,8 @@ import re
 class Bot():
 
     #Descomente para escolher uma cor
-    #botcolor = (255,0,0)  # BOT COLOR
-    name = "INF1771 Bot Example1" # BOT NAME
+    botcolor = (1,160,32)  # BOT COLOR
+    name = "BellSol Bot" # BOT NAME
     host = "atari.icad.puc-rio.br" # SERVER
     port = 8888
 
