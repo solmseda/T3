@@ -219,6 +219,15 @@ class GameAI():
     # </summary>
     # <param name="o">list of observations</param>
     def GetObservations(self, o):
+        # Reset parciais por turno para não carregar item/breeze/blocked antigos,
+        # mas manter inimigo até limpar explícito (evita perder alvo para tiro).
+        self.item_here = None
+        self.damage_taken = False
+        self.just_hit_enemy = False
+        self.last_move_failed = False
+        self.hazard_alert = False
+        saw_blue_here = False
+
         for s in o:
             if s == "blocked":
                 self.last_move_failed = True
@@ -241,6 +250,7 @@ class GameAI():
                     self.hazards.add(self._pos_tuple(self.player))
                 self._log(f"obs: {s} at {self._pos_tuple(self.player)}")
                 if s == "blueLight":
+                    saw_blue_here = True
                     self.gold_spots.add(self._pos_tuple(self.player))
 
             elif s == "damage":
@@ -261,6 +271,11 @@ class GameAI():
                 except Exception:
                     self.enemy_distance = 1
                 self._log(f"obs: enemy at {self.enemy_distance} steps")
+
+        current_pos = self._pos_tuple(self.player)
+        if not saw_blue_here and current_pos in self.gold_spots:
+            # Sem blueLight neste turno: remove marca antiga de ouro nesta célula.
+            self.gold_spots.discard(current_pos)
 
 
     # <summary>
@@ -466,7 +481,8 @@ class GameAI():
     def _maybe_plan_to_gold(self):
         if not self.gold_spots:
             return
-        if self.action_counter == 0 or self.action_counter % 100 != 0:
+        # Depois de 100 ações, ouro vira prioridade sempre que houver rota segura conhecida.
+        if self.action_counter < 100:
             return
         if self.state not in (AIState.EXPLORE, AIState.COLLECT, AIState.SEARCH):
             return
@@ -587,4 +603,3 @@ class GameAI():
                 print(f"[AI] {m}")
         else:
             print(f"[AI] pos={self._pos_tuple(self.player)} dir={self.dir} state={self.state.name} -> {decision}")
-
