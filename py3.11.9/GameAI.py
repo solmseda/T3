@@ -66,9 +66,11 @@ class GameAI():
         self.last_action: Optional[str] = None
         self.hazard_alert = False  # true when breeze/flash sensed
         self.gold_spots: set[Tuple[int, int]] = set()
+        self.powerup_spots: set[Tuple[int, int]] = set()
         self.planned_path: List[str] = []
         self.action_counter = 0
         self.debug = True  # set to False to silence logs
+        self.missed_shots = 0
         self._log_buffer: List[str] = []
         self.risky: set[Tuple[int, int]] = set()
 
@@ -242,6 +244,8 @@ class GameAI():
                 self._log(f"obs: {s} at {self._pos_tuple(self.player)}")
                 if s == "blueLight":
                     self.gold_spots.add(self._pos_tuple(self.player))
+                elif s == "redLight":
+                    self.powerup_spots.add(self._pos_tuple(self.player))
 
             elif s == "damage":
                 # sofre dano: entrar em evasão (LOS)
@@ -276,6 +280,8 @@ class GameAI():
         # remove stale gold mark if nothing visível aqui
         if self._pos_tuple(self.player) in self.gold_spots and self.item_here is None:
             self.gold_spots.discard(self._pos_tuple(self.player))
+        if self._pos_tuple(self.player) in self.powerup_spots and self.item_here is None:
+            self.powerup_spots.discard(self._pos_tuple(self.player))
     
 
     # <summary>
@@ -283,6 +289,16 @@ class GameAI():
     # </summary>
     # <returns>command string to new decision</returns>
     def GetDecision(self) -> str:
+        
+        if self.last_action == "atacar":
+            if self.just_hit_enemy:
+                self.missed_shots = 0  # Acertou! Zera o contador.
+            else:
+                self.missed_shots += 1 # Errou (bateu na parede/nada), incrementa.
+                self._log(f"Tiro falhou! Erros consecutivos: {self.missed_shots}")
+        else:
+        # Se fizemos qualquer outra coisa (andar, virar), zeramos o contador
+            self.missed_shots = 0
 
         if self.heard_steps > 0:
             self.heard_steps -= 1
@@ -297,8 +313,10 @@ class GameAI():
         if self.planned_path:
             decision = self.planned_path.pop(0)
         else:
-            self._maybe_plan_to_gold()
-
+            if self.energy <= 50:
+                self._maybe_plan_to_powerup()
+            if not self.planned_path:
+                self._maybe_plan_to_gold()
             if self.planned_path:
                 decision = self.planned_path.pop(0)
             else:
@@ -340,6 +358,7 @@ class GameAI():
     def _collect_decision(self) -> str:
         # Regra de coleta: pegar itens úteis, evitar veneno
         if self.item_here == "redLight":
+            self.powerup_spots.discard(self._pos_tuple(self.player))
             return "pegar_powerup"
         if self.item_here == "blueLight":
             self.gold_spots.discard(self._pos_tuple(self.player))
@@ -368,9 +387,23 @@ class GameAI():
 
         return "virar_direita"
 
+    # def _chase_or_attack(self) -> str:
+    #     # Regras de perseguição/tiro
+    #     if self.enemy_distance is not None:
+    #         if self.enemy_distance <= 2 or self.just_hit_enemy:
+    #             return "atacar"
+    #         if self._is_safe(self._front_pos()) and not self.last_move_failed:
+    #             return "andar"
+    #         return self._pick_turn_by_visit()
+    #     return self._search_for_enemy()
+
     def _chase_or_attack(self) -> str:
         # Regras de perseguição/tiro
         if self.enemy_distance is not None:
+            
+            if self.missed_shots >= 3:
+                self._log("Muitos erros! Tentando reposicionar...")
+                return "andar"
             if self.enemy_distance <= 2 or self.just_hit_enemy:
                 return "atacar"
             if self._is_safe(self._front_pos()) and not self.last_move_failed:
@@ -482,6 +515,41 @@ class GameAI():
             if actions:
                 self.planned_path = actions
                 self._log(f"plan: path to gold {target} with {len(actions)} steps")
+        
+    def _maybe_plan_to_powerup(self):
+        # Só planeja se não tiver caminho, se tiver energia baixa e se conhecer algum powerup
+        if self.planned_path: 
+            return
+        if not self.powerup_spots:
+            return
+            
+        # Define quais células são seguras para andar 
+        start = self._pos_tuple(self.player)
+        safe_nodes = {pos for pos in self.visited.keys() if pos not in self.hazards and pos not in self.blocked}
+        if start not in safe_nodes:
+            safe_nodes.add(start)
+
+        # Usa a função existente para achar o caminho mais curto
+        # Reutilizamos a lógica _nearest_gold_path, mas passamos a lista de powerups
+        best_target = None
+        best_path = None
+        
+        # Procura o powerup mais próximo
+        for p in self.powerup_spots:
+            if p not in safe_nodes:
+                continue
+            path = self._astar_path(start, p, safe_nodes)
+            if path:
+                if best_path is None or len(path) < len(best_path):
+                    best_path = path
+                    best_target = p
+
+        # Se achou um caminho, transforma em ações (andar, virar...)
+        if best_target and best_path:
+            actions = self._path_to_actions(best_path)
+            if actions:
+                self.planned_path = actions
+                self._log(f"EMERGÊNCIA: Energia {self.energy}%! Buscando powerup em {best_target}")
 
     def _nearest_gold_path(self, start: Tuple[int, int], safe_nodes: set[Tuple[int, int]]):
         best_target = None
