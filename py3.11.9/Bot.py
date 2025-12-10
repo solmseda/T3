@@ -329,6 +329,11 @@ class Bot():
     def DoDecision(self):
         
         decision = self.gameAi.GetDecision()
+
+        if self.gameAi.message is not None:
+            self.sendMsg(self.gameAi.message) # Envia para o servidor
+            self.gameAi.message = None        # Limpa para não repetir
+
         self.sendDecision(decision)
         self.client.sendRequestUserStatus()
         self.client.sendRequestObservation()

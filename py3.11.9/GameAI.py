@@ -73,6 +73,8 @@ class GameAI():
         self.missed_shots = 0
         self._log_buffer: List[str] = []
         self.risky: set[Tuple[int, int]] = set()
+        self.message = None  
+        self.enemy_seen_last_turn = False
 
     # <summary>
     # Refresh player status
@@ -221,6 +223,8 @@ class GameAI():
     # </summary>
     # <param name="o">list of observations</param>
     def GetObservations(self, o):
+        enemy_found_now = False
+
         for s in o:
             if s == "blocked":
                 self.last_move_failed = True
@@ -256,15 +260,24 @@ class GameAI():
             elif s == "hit":
                 # confirmamos tiro acertado
                 self.just_hit_enemy = True
+                self.missed_shots = 0
+                self.message = "Toma essa!" #fala quandoa certa o tiro
                 self._log("obs: hit landed")
             
             elif s.startswith("enemy#") or s == "enemy":
+                enemy_found_now = True # Marque que vimos alguém
                 try:
                     value = s.split("#")[1] if "#" in s else "1"
                     self.enemy_distance = int(value)
                 except Exception:
                     self.enemy_distance = 1
                 self._log(f"obs: enemy at {self.enemy_distance} steps")
+        
+        if enemy_found_now and not self.enemy_seen_last_turn:
+            self.message = "Achei voce!"
+
+        # Atualiza a memória para o próximo turno
+        self.enemy_seen_last_turn = enemy_found_now
 
 
     # <summary>
@@ -330,6 +343,11 @@ class GameAI():
                     decision = self._search_for_enemy()
                 else:
                     decision = self._explore_decision()
+                    
+        if decision == "atacar":
+        # Só fala se for o primeiro tiro ou se mudou de ação (para não spammar)
+            if self.last_action != "atacar": 
+                self.message = "Vou atirar!"
 
         decision = self._anti_spin(decision)
         self._register_action(decision)
