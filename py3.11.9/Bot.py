@@ -34,9 +34,10 @@ import re
 class Bot():
 
     #Descomente para escolher uma cor
-    botcolor = (1,160,32)  # BOT COLOR
-    name = "BellSol Bot" # BOT NAME
-    host = "atari.icad.puc-rio.br" # SERVER
+    botcolor = (31,117,254)  # BOT COLOR
+    name = "BS Bot" # BOT NAME
+    # host = "atari.icad.puc-rio.br" # SERVER
+    host = "192.168.0.102"
     port = 8888
 
     client = None
@@ -329,6 +330,11 @@ class Bot():
     def DoDecision(self):
         
         decision = self.gameAi.GetDecision()
+
+        if self.gameAi.message is not None:
+            self.sendMsg(self.gameAi.message) # Envia para o servidor
+            self.gameAi.message = None        # Limpa para não repetir
+
         self.sendDecision(decision)
         self.client.sendRequestUserStatus()
         self.client.sendRequestObservation()

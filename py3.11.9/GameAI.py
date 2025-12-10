@@ -71,6 +71,8 @@ class GameAI():
         self.debug = True  # set to False to silence logs
         self._log_buffer: List[str] = []
         self.risky: set[Tuple[int, int]] = set()
+        self.enemy_seen_last_turn = False
+        self.message = None
 
     # <summary>
     # Refresh player status
@@ -219,6 +221,7 @@ class GameAI():
     # </summary>
     # <param name="o">list of observations</param>
     def GetObservations(self, o):
+        enemy_found_now = False
         # Reset parciais por turno para não carregar item/breeze/blocked antigos,
         # mas manter inimigo até limpar explícito (evita perder alvo para tiro).
         self.item_here = None
@@ -265,17 +268,24 @@ class GameAI():
                 self._log("obs: hit landed")
             
             elif s.startswith("enemy#") or s == "enemy":
+                enemy_found_now = True
                 try:
                     value = s.split("#")[1] if "#" in s else "1"
                     self.enemy_distance = int(value)
                 except Exception:
                     self.enemy_distance = 1
-                self._log(f"obs: enemy at {self.enemy_distance} steps")
+                self._log(f"obs: enemy at {self.enemy_distance} steps")     
 
         current_pos = self._pos_tuple(self.player)
         if not saw_blue_here and current_pos in self.gold_spots:
             # Sem blueLight neste turno: remove marca antiga de ouro nesta célula.
             self.gold_spots.discard(current_pos)
+        
+        if enemy_found_now and not self.enemy_seen_last_turn:
+            self.message = "Achei você"
+
+            self.enemy_seen_last_turn = enemy_found_now
+            
 
 
     # <summary>
